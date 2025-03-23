@@ -6,8 +6,6 @@ import io
 from datetime import datetime
 from dotenv import load_dotenv
 from utils import process_data
-from config import Config, logger
-from werkzeug.utils import secure_filename
 
 # Настройка логирования
 logging.basicConfig(
@@ -20,7 +18,6 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 app = Flask(__name__)
-app.config.from_object(Config)
 
 # Глобальное хранилище данных
 data_store = {
@@ -28,17 +25,6 @@ data_store = {
     'processed_data': None,
     'last_update': None
 }
-
-@app.before_request
-def security_check():
-    """Проверки безопасности перед обработкой запроса."""
-    # Проверка на подозрительные запросы
-    if request.path.startswith('/.env') or '.env' in request.path:
-        logger.warning(f"⚠️ Подозрительный запрос к {request.path} от {request.remote_addr}")
-        return "Доступ запрещен", 403
-    
-    # Логируем все запросы
-    logger.info(f"📝 {request.method} {request.path} от {request.remote_addr}")
 
 @app.route('/', methods=['GET', 'POST'])
 def index():

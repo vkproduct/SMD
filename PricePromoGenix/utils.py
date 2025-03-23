@@ -159,7 +159,7 @@ def check_holidays(location, current_date="2025-03-23"):
 
 def get_ai_recommendation(row):
     """
-    Получение рекомендаций от OpenAI с учетом безопасности.
+    Получение рекомендаций от OpenAI.
     
     Args:
         row: Строка данных
@@ -170,10 +170,8 @@ def get_ai_recommendation(row):
     try:
         api_key = os.getenv('OPENAI_API_KEY')
         if not api_key:
-            logger.warning("API ключ OpenAI не найден в переменных окружения")
             return "API ключ OpenAI не настроен"
         
-        # Безопасно формируем промпт без чувствительных данных
         prompt = f"""
         На основе метрик товара "{row.get('Product', 'Товар')}":
         - Current_Price: {row.get('Current_Price', 'N/A')}
@@ -194,15 +192,9 @@ def get_ai_recommendation(row):
         3. Ожидаемый эффект
         """
         
-        # Скрываем API ключ из логирования
-        logger.info(f"Отправка запроса к OpenAI API для товара {row.get('Product', 'Неизвестный')}")
-        
         response = requests.post(
             "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            },
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={
                 "model": "gpt-3.5-turbo",
                 "messages": [{"role": "user", "content": prompt}],
@@ -210,29 +202,12 @@ def get_ai_recommendation(row):
             },
             timeout=10
         )
-        
-        # Проверка ошибок без логирования полного ответа
         response.raise_for_status()
-        result = response.json()
-        
-        if 'choices' not in result or len(result['choices']) == 0:
-            logger.error("Неожиданный формат ответа от OpenAI API")
-            return "Ошибка формата ответа от API"
-            
-        return result['choices'][0]['message']['content']
+        return response.json()['choices'][0]['message']['content']
         
     except requests.exceptions.RequestException as e:
-        # Логируем ошибку без полного стека и API ключа
-        error_msg = str(e)
-        safe_error = error_msg.replace(api_key, "***API_KEY***") if api_key in error_msg else error_msg
-        logger.error(f"Ошибка OpenAI: {safe_error}")
-        return "Ошибка связи с OpenAI API"
-    except Exception as e:
-        # Общий случай: убеждаемся, что API ключ не попадает в логи
-        error_msg = str(e)
-        safe_error = error_msg.replace(api_key, "***API_KEY***") if api_key and api_key in error_msg else error_msg
-        logger.error(f"Непредвиденная ошибка: {safe_error}")
-        return "Непредвиденная ошибка при генерации рекомендации"
+        logger.error(f"Ошибка OpenAI: {str(e)}")
+        return "Ошибка связи с OpenAI"
 
 def generate_basic_recommendation(df):
     """
