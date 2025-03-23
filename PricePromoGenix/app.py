@@ -1,159 +1,133 @@
-from flask import Flask, request, render_template, jsonify, redirect, url_for, Response, send_file
-import pandas as pd
-import logging
-import os
-import io
-from datetime import datetime
+from flask import Flask, render_template, request, Response, jsonify
 from dotenv import load_dotenv
+import os
+import pandas as pd
+from werkzeug.utils import secure_filename
+from datetime import datetime
+import logging
 from utils import process_data
-
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+import io
 
 # Загрузка переменных окружения
 load_dotenv()
 
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
+
+# Конфигурация для загрузки файлов
+app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max-limit
+
+# Создаем директорию для загрузок, если её нет
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Глобальное хранилище данных
 data_store = {
     'raw_data': None,
     'processed_data': None,
+    'full_data': None,  # для хранения всех метрик
     'last_update': None
 }
+
+def allowed_file(filename):
+    """Проверка расширения файла."""
+    ALLOWED_EXTENSIONS = {'csv', 'xlsx', 'xls'}
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
-        if 'file' not in request.files:
-            return render_template('index.html', error='Файл не выбран')
+        if 'file' not in request.files or not request.files['file'].filename:
+            return render_template('index.html', error='Файл не выбран', data_store=data_store)
         
         file = request.files['file']
-        if file.filename == '':
-            return render_template('index.html', error='Файл не выбран')
+        if not file.filename.endswith(('.csv', '.xlsx', '.xls')):
+            return render_template('index.html', error='Поддерживаются только файлы CSV и Excel', data_store=data_store)
         
         try:
-            # Определение типа файла
             if file.filename.endswith('.csv'):
                 data = pd.read_csv(file)
-            elif file.filename.endswith(('.xlsx', '.xls')):
-                data = pd.read_excel(file)
             else:
-                return render_template('index.html', error='Поддерживаются только файлы CSV и Excel')
+                data = pd.read_excel(file)
             
-            # Сохранение сырых данных
+            # Сохраняем сырые данные
             data_store['raw_data'] = data
             
-            # Обработка данных - process_data уже включает генерацию рекомендаций
+            # Обрабатываем данные для отображения
             processed_data = process_data(data)
-            data_store['processed_data'] = processed_data
             
-            # Обновление времени
+            # Создаем упрощенную таблицу для основного отображения
+            simple_columns = ['Product', 'Current_Price', 'Cost', 'Current_Stock', 'Sales_30d', 'Competitor_Price', 'History', 'Recommendation']
+            simple_table = processed_data[simple_columns].copy()
+            
+            # Сохраняем обработанные данные
+            data_store['processed_data'] = processed_data
             data_store['last_update'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            logger.info(f"Файл {file.filename} обработан, строк: {len(processed_data)}")
             
             return render_template(
-                'index.html', 
-                table=processed_data.to_html(classes='table table-striped'),
+                'index.html',
+                table=simple_table.to_html(classes='table table-striped', index=False),
                 success=True,
-                last_update=data_store['last_update']
+                last_update=data_store['last_update'],
+                data_store=data_store
             )
-            
         except Exception as e:
-            logger.error(f"Ошибка при обработке файла: {str(e)}")
-            return render_template('index.html', error=f'Ошибка: {str(e)}')
+            logger.error(f"Ошибка: {str(e)}")
+            data_store['processed_data'] = None
+            return render_template('index.html', error=f'Ошибка: {str(e)}', data_store=data_store)
     
-    return render_template('index.html')
+    return render_template('index.html', data_store=data_store)
 
-@app.route('/api/upload', methods=['POST'])
-def api_upload():
-    try:
-        # Проверяем формат данных
-        if request.is_json:
-            data_json = request.get_json()
-            data = pd.DataFrame(data_json)
-        else:
-            # Обработка формы с файлом
-            if 'file' not in request.files:
-                return jsonify({"error": "Файл не найден"}), 400
-            
-            file = request.files['file']
-            if file.filename.endswith('.csv'):
-                data = pd.read_csv(file)
-            elif file.filename.endswith(('.xlsx', '.xls')):
-                data = pd.read_excel(file)
-            else:
-                return jsonify({"error": "Поддерживаются только файлы CSV и Excel"}), 400
-        
-        # Обработка данных через единую функцию process_data,
-        # которая также генерирует рекомендации
-        processed_data = process_data(data)
-        
-        # Обновление хранилища
-        data_store['raw_data'] = data
-        data_store['processed_data'] = processed_data
-        
-        # Обновление времени
-        data_store['last_update'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        return jsonify({
-            "success": True,
-            "data": processed_data.to_dict(orient='records'),
-            "last_update": data_store['last_update']
-        })
-        
-    except Exception as e:
-        logger.error(f"Ошибка API: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/data', methods=['GET'])
-def get_data():
-    if data_store['processed_data'] is None:
-        return jsonify({"error": "Нет обработанных данных"}), 404
+@app.route('/api/full_data', methods=['GET'])
+def full_data():
+    if data_store['raw_data'] is None:
+        return jsonify({"error": "Нет данных"}), 404
     
-    return jsonify({
-        "data": data_store['processed_data'].to_dict(orient='records'),
-        "last_update": data_store['last_update']
-    })
+    # Получаем полные данные с историей
+    full_df = process_data(data_store['raw_data'])
+    
+    # Добавляем все метрики
+    full_df['Sales_Velocity'] = (full_df['Sales_30d'] / 30).round(2)
+    full_df['Stock_Runway'] = (full_df['Current_Stock'] / full_df['Sales_Velocity']).round(1)
+    full_df['Discount_Margin'] = ((full_df['Current_Price'] - full_df['Cost']) / full_df['Current_Price'] * 100).round(1)
+    full_df['Competitor_Gap'] = ((full_df['Current_Price'] - full_df['Competitor_Price']) / full_df['Competitor_Price'] * 100).round(1)
+    
+    # Добавляем исторические данные, если они есть
+    if 'Price_History' in data_store['raw_data'].columns and 'Sales_History' in data_store['raw_data'].columns:
+        full_df['Price_History'] = data_store['raw_data']['Price_History']
+        full_df['Sales_History'] = data_store['raw_data']['Sales_History']
+    
+    return jsonify(full_df.to_dict(orient='records'))
 
 @app.route('/api/export', methods=['GET'])
 def export_data():
+    format_type = request.args.get('format', 'json')
+    
     if data_store['processed_data'] is None:
         return jsonify({"error": "Нет данных для экспорта"}), 404
     
-    format_type = request.args.get('format', 'csv')
+    if format_type == 'csv':
+        return Response(
+            data_store['processed_data'].to_csv(index=False),
+            mimetype='text/csv',
+            headers={"Content-Disposition": "attachment;filename=export.csv"}
+        )
+    elif format_type == 'excel':
+        output = io.BytesIO()
+        data_store['processed_data'].to_excel(output, index=False)
+        output.seek(0)
+        return Response(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            headers={"Content-Disposition": "attachment;filename=export.xlsx"}
+        )
     
-    try:
-        if format_type == 'csv':
-            csv_data = data_store['processed_data'].to_csv(index=False)
-            return Response(
-                csv_data,
-                mimetype="text/csv",
-                headers={"Content-disposition": f"attachment; filename=price_actions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"}
-            )
-        elif format_type == 'excel':
-            # Создаем буфер для Excel файла
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                data_store['processed_data'].to_excel(writer, sheet_name='Data', index=False)
-            output.seek(0)
-            
-            return send_file(
-                output,
-                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                as_attachment=True,
-                download_name=f"price_actions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-            )
-        elif format_type == 'json':
-            return jsonify(data_store['processed_data'].to_dict(orient='records'))
-        else:
-            return jsonify({"error": "Неподдерживаемый формат экспорта"}), 400
-    except Exception as e:
-        logger.error(f"Ошибка экспорта данных: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+    # По умолчанию возвращаем JSON
+    return jsonify(data_store['processed_data'].to_dict(orient='records'))
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000) 
+    app.run(host='0.0.0.0', port=5001, debug=True) 
